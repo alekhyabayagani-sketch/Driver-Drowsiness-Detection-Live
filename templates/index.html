@@ -252,6 +252,58 @@ function hideCamera() {
     document.getElementById("cameraState").textContent = "Camera Off";
 }
 
+/* CAMERA BLACK SCREEN FIX */
+function waitForCameraVideo() {
+    return new Promise((resolve, reject) => {
+        if (camera.videoWidth > 0 && camera.videoHeight > 0) {
+            resolve();
+            return;
+        }
+
+        let finished = false;
+
+        const cleanup = () => {
+            clearTimeout(timeout);
+            camera.removeEventListener("loadedmetadata", onLoaded);
+            camera.removeEventListener("error", onError);
+        };
+
+        const finish = (error) => {
+            if (finished) return;
+            finished = true;
+            cleanup();
+
+            if (error) reject(error);
+            else resolve();
+        };
+
+        const onLoaded = () => {
+            if (camera.videoWidth > 0 && camera.videoHeight > 0) {
+                finish();
+            } else {
+                finish(new Error("Camera video dimensions are unavailable."));
+            }
+        };
+
+        const onError = () => {
+            finish(new Error("Camera video loading failed."));
+        };
+
+        const timeout = setTimeout(() => {
+            finish(new Error("Camera video is not available. Please try again."));
+        }, 10000);
+
+        camera.addEventListener("loadedmetadata", onLoaded);
+        camera.addEventListener("error", onError);
+
+        if (camera.readyState >= 1 &&
+            camera.videoWidth > 0 &&
+            camera.videoHeight > 0) {
+            finish();
+        }
+    });
+}
+
 async function startMonitoring() {
     setMessage("Requesting camera permission...", "warning");
     startButton.disabled = true;
@@ -261,7 +313,6 @@ async function startMonitoring() {
             throw new Error("Camera access requires HTTPS or a supported browser.");
         }
 
-        // Open the user's own laptop camera in the browser
         mediaStream = await navigator.mediaDevices.getUserMedia({
             video: {
                 width: { ideal: 640 },
@@ -272,7 +323,17 @@ async function startMonitoring() {
         });
 
         camera.srcObject = mediaStream;
+
+        // Wait until the browser receives actual camera video dimensions
+        await waitForCameraVideo();
+
         await camera.play();
+
+        if (!camera.videoWidth || !camera.videoHeight) {
+            throw new Error("Camera feed is not available. Please try again.");
+        }
+
+        showCamera();
 
         const response = await fetch("/start");
 
@@ -281,7 +342,6 @@ async function startMonitoring() {
         }
 
         monitoring = true;
-        showCamera();
 
         document.getElementById("monitorStatus").textContent = "Running";
         document.getElementById("headerState").textContent = "Monitoring";
@@ -290,7 +350,6 @@ async function startMonitoring() {
         setMessage("Monitoring started. Keep your face visible to the camera.");
         addHistory("Monitoring started");
 
-        // Send camera frames to Flask for eye analysis
         if (captureTimer !== null) clearInterval(captureTimer);
         captureTimer = setInterval(sendFrame, 250);
         sendFrame();
@@ -307,9 +366,12 @@ async function startMonitoring() {
             message = "Camera permission denied. Allow camera access in your browser.";
         } else if (error.name === "NotFoundError") {
             message = "No camera found on this device.";
+        } else if (error.name === "NotReadableError") {
+            message = "Camera is being used by another application. Close it and try again.";
         }
 
         setMessage(message, "alert");
+        console.error("Camera start error:", error);
     }
 }
 
@@ -338,10 +400,14 @@ async function sendFrame() {
         const formData = new FormData();
         formData.append("frame", blob, "frame.jpg");
 
-        await fetch("/process_frame", {
+        const response = await fetch("/process_frame", {
             method: "POST",
             body: formData
         });
+
+        if (!response.ok) {
+            console.log("Frame processing server error:", response.status);
+        }
 
     } catch (error) {
         console.log("Frame processing error:", error);
@@ -539,7 +605,7 @@ async function checkStatus() {
         lastHistoryStatus = detection;
 
     } catch (error) {
-        // Ignore temporary network errors
+        console.log("Status check error:", error);
     }
 }
 
