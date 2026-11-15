@@ -132,7 +132,6 @@ button:hover{opacity:.88}button:disabled{opacity:.45;cursor:not-allowed}
                 <strong>Camera is not running</strong>
                 <p>Click Start Monitoring to begin driver detection.</p>
             </div>
-
             <video id="camera" autoplay playsinline muted style="display:none"></video>
             <canvas id="frameCanvas" style="display:none"></canvas>
         </div>
@@ -140,7 +139,7 @@ button:hover{opacity:.88}button:disabled{opacity:.45;cursor:not-allowed}
         <div class="camera-controls">
             <button class="btn-start" id="startButton" onclick="startMonitoring()">▶ Start Monitoring</button>
             <button class="btn-stop" id="stopButton" onclick="stopMonitoring()" disabled>■ Stop Monitoring</button>
-            <button class="btn-sound" onclick="enableSound()">🔊 Enable Sound</button>
+            <button class="btn-sound" id="soundButton" onclick="enableSound()">🔊 Enable Sound</button>
         </div>
 
         <div class="status-box">
@@ -204,6 +203,7 @@ let lastHistoryStatus = "";
 let monitoring = false;
 let mediaStream = null;
 let captureTimer = null;
+let statusTimer = null;
 let processingFrame = false;
 
 const camera = document.getElementById("camera");
@@ -252,7 +252,6 @@ function hideCamera() {
     document.getElementById("cameraState").textContent = "Camera Off";
 }
 
-/* CAMERA BLACK SCREEN FIX */
 function waitForCameraVideo() {
     return new Promise((resolve, reject) => {
         if (camera.videoWidth > 0 && camera.videoHeight > 0) {
@@ -260,47 +259,34 @@ function waitForCameraVideo() {
             return;
         }
 
-        let finished = false;
+        const timeout = setTimeout(() => {
+            cleanup();
+            reject(new Error("Camera video is not available. Please try again."));
+        }, 10000);
 
-        const cleanup = () => {
+        function cleanup() {
             clearTimeout(timeout);
             camera.removeEventListener("loadedmetadata", onLoaded);
             camera.removeEventListener("error", onError);
-        };
+        }
 
-        const finish = (error) => {
-            if (finished) return;
-            finished = true;
-            cleanup();
-
-            if (error) reject(error);
-            else resolve();
-        };
-
-        const onLoaded = () => {
+        function onLoaded() {
             if (camera.videoWidth > 0 && camera.videoHeight > 0) {
-                finish();
+                cleanup();
+                resolve();
             } else {
-                finish(new Error("Camera video dimensions are unavailable."));
+                cleanup();
+                reject(new Error("Camera video dimensions are unavailable."));
             }
-        };
+        }
 
-        const onError = () => {
-            finish(new Error("Camera video loading failed."));
-        };
-
-        const timeout = setTimeout(() => {
-            finish(new Error("Camera video is not available. Please try again."));
-        }, 10000);
+        function onError() {
+            cleanup();
+            reject(new Error("Camera video loading failed."));
+        }
 
         camera.addEventListener("loadedmetadata", onLoaded);
         camera.addEventListener("error", onError);
-
-        if (camera.readyState >= 1 &&
-            camera.videoWidth > 0 &&
-            camera.videoHeight > 0) {
-            finish();
-        }
     });
 }
 
@@ -323,54 +309,39 @@ async function startMonitoring() {
         });
 
         camera.srcObject = mediaStream;
-
-        // Wait until the browser receives actual camera video dimensions
-        await waitForCameraVideo();
-
         await camera.play();
-
-        if (!camera.videoWidth || !camera.videoHeight) {
-            throw new Error("Camera feed is not available. Please try again.");
-        }
+        await waitForCameraVideo();
 
         showCamera();
 
         const response = await fetch("/start");
-
-        if (!response.ok) {
-            throw new Error("Server could not start monitoring.");
-        }
+        if (!response.ok) throw new Error("Server could not start monitoring.");
 
         monitoring = true;
-
         document.getElementById("monitorStatus").textContent = "Running";
         document.getElementById("headerState").textContent = "Monitoring";
-        stopButton.disabled = false;
+        document.getElementById("blinkCount").textContent = "0";
+        document.getElementById("detectionStatus").textContent = "Face not detected";
 
+        stopButton.disabled = false;
         setMessage("Monitoring started. Keep your face visible to the camera.");
         addHistory("Monitoring started");
 
-        if (captureTimer !== null) clearInterval(captureTimer);
+        if (captureTimer) clearInterval(captureTimer);
+        if (statusTimer) clearInterval(statusTimer);
+
         captureTimer = setInterval(sendFrame, 250);
+        statusTimer = setInterval(checkStatus, 500);
+
         sendFrame();
+        checkStatus();
 
     } catch (error) {
         monitoring = false;
         hideCamera();
         startButton.disabled = false;
         stopButton.disabled = true;
-
-        let message = error.message || "Camera could not start.";
-
-        if (error.name === "NotAllowedError") {
-            message = "Camera permission denied. Allow camera access in your browser.";
-        } else if (error.name === "NotFoundError") {
-            message = "No camera found on this device.";
-        } else if (error.name === "NotReadableError") {
-            message = "Camera is being used by another application. Close it and try again.";
-        }
-
-        setMessage(message, "alert");
+        setMessage(error.message || "Camera could not start.", "alert");
         console.error("Camera start error:", error);
     }
 }
@@ -383,17 +354,15 @@ async function sendFrame() {
     try {
         const width = camera.videoWidth;
         const height = camera.videoHeight;
-
         if (!width || !height) return;
 
         canvas.width = width;
         canvas.height = height;
-
         context.drawImage(camera, 0, 0, width, height);
 
-        const blob = await new Promise(resolve => {
-            canvas.toBlob(resolve, "image/jpeg", 0.75);
-        });
+        const blob = await new Promise(resolve =>
+            canvas.toBlob(resolve, "image/jpeg", 0.85)
+        );
 
         if (!blob || !monitoring) return;
 
@@ -406,11 +375,23 @@ async function sendFrame() {
         });
 
         if (!response.ok) {
-            console.log("Frame processing server error:", response.status);
+            const errorText = await response.text();
+            throw new Error("Frame upload failed: " + response.status + " " + errorText);
+        }
+
+        const data = await response.json();
+
+        if (data.blink_count !== undefined) {
+            document.getElementById("blinkCount").textContent = data.blink_count;
+        }
+
+        if (data.detection_status) {
+            updateDetection(data.detection_status);
         }
 
     } catch (error) {
-        console.log("Frame processing error:", error);
+        console.error("Frame processing error:", error);
+        setMessage("Frame processing error. Check server logs.", "alert");
     } finally {
         processingFrame = false;
     }
@@ -418,21 +399,23 @@ async function sendFrame() {
 
 async function stopMonitoring() {
     setMessage("Stopping monitoring...", "warning");
+    monitoring = false;
+
+    if (captureTimer) {
+        clearInterval(captureTimer);
+        captureTimer = null;
+    }
+
+    if (statusTimer) {
+        clearInterval(statusTimer);
+        statusTimer = null;
+    }
 
     try {
         await fetch("/stop");
     } catch (error) {
         console.log("Stop request error:", error);
     }
-
-    monitoring = false;
-
-    if (captureTimer !== null) {
-        clearInterval(captureTimer);
-        captureTimer = null;
-    }
-
-    processingFrame = false;
 
     stopBuzzer();
     stopVoiceAlert();
@@ -445,7 +428,6 @@ async function stopMonitoring() {
 
     startButton.disabled = false;
     stopButton.disabled = true;
-
     setMessage("Monitoring stopped.");
     addHistory("Monitoring stopped");
 }
@@ -453,20 +435,14 @@ async function stopMonitoring() {
 async function enableSound() {
     try {
         const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-
         if (!AudioContextClass) throw new Error("Audio not supported");
 
         if (!audioContext) audioContext = new AudioContextClass();
-
-        if (audioContext.state === "suspended") {
-            await audioContext.resume();
-        }
+        if (audioContext.state === "suspended") await audioContext.resume();
 
         soundEnabled = true;
-        playBeep();
-        speakAlert();
-
-        setMessage("Sound enabled. Buzzer and voice alert are ready.");
+        document.getElementById("soundButton").textContent = "🔊 Sound Enabled";
+        setMessage("Sound enabled. Alert sound is ready.");
 
     } catch (error) {
         setMessage("Could not enable sound. Check browser audio settings.", "alert");
@@ -489,7 +465,6 @@ function playBeep() {
 
         oscillator.start();
         oscillator.stop(audioContext.currentTime + 0.25);
-
     } catch (error) {
         console.log("Buzzer playback error:", error);
     }
@@ -497,7 +472,6 @@ function playBeep() {
 
 function startBuzzer() {
     if (!soundEnabled || buzzerTimer !== null) return;
-
     playBeep();
     buzzerTimer = setInterval(playBeep, 900);
 }
@@ -516,7 +490,6 @@ function speakAlert() {
     const message = new SpeechSynthesisUtterance(
         "Are you sleeping? Please stay alert!"
     );
-
     message.lang = "en-US";
     message.rate = 0.9;
     message.pitch = 1;
@@ -531,86 +504,68 @@ function stopVoiceAlert() {
     }
 }
 
+function updateDetection(detection) {
+    document.getElementById("detectionStatus").textContent = detection;
+
+    if (!monitoring) return;
+
+    if (detection === "DROWSINESS ALERT!") {
+        setMessage("DROWSINESS ALERT! Are you sleeping? Please stay alert!", "alert");
+
+        if (!wasAlerting) {
+            addHistory("DROWSINESS ALERT detected");
+            speakAlert();
+        }
+
+        wasAlerting = true;
+        startBuzzer();
+
+    } else {
+        stopBuzzer();
+
+        if (wasAlerting) stopVoiceAlert();
+        wasAlerting = false;
+
+        if (detection === "Eyes Closed") {
+            setMessage("Eyes closed. Monitoring carefully.", "warning");
+        } else if (detection === "Eyes Open") {
+            setMessage("Driver's eyes are open. Monitoring active.");
+        } else if (detection === "Face not detected") {
+            setMessage("Face not detected. Please face the camera.", "warning");
+        } else {
+            setMessage(detection);
+        }
+    }
+
+    if (detection !== lastHistoryStatus &&
+        (detection === "Eyes Closed" || detection === "Face not detected")) {
+        addHistory(detection);
+    }
+
+    lastHistoryStatus = detection;
+}
+
 async function checkStatus() {
+    if (!monitoring) return;
+
     try {
         const response = await fetch("/status");
         if (!response.ok) return;
 
         const data = await response.json();
 
-        document.getElementById("blinkCount").textContent =
-            data.blink_count ?? 0;
-
-        const detection = data.detection_status || "Waiting";
-
-        document.getElementById("detectionStatus").textContent = detection;
-
-        const serverMonitoring = Boolean(data.monitoring);
-
-        document.getElementById("monitorStatus").textContent =
-            serverMonitoring ? "Running" : "Stopped";
-
-        document.getElementById("headerState").textContent =
-            serverMonitoring ? "Monitoring" : "System Ready";
-
-        if (!monitoring) {
-            stopBuzzer();
-            stopVoiceAlert();
-            wasAlerting = false;
-            return;
+        if (data.blink_count !== undefined) {
+            document.getElementById("blinkCount").textContent = data.blink_count;
         }
 
-        if (detection === "DROWSINESS ALERT!") {
-            setMessage(
-                "DROWSINESS ALERT! Are you sleeping? Please stay alert!",
-                "alert"
-            );
-
-            if (!wasAlerting) {
-                addHistory("DROWSINESS ALERT detected");
-                speakAlert();
-            }
-
-            wasAlerting = true;
-            startBuzzer();
-
-        } else {
-            stopBuzzer();
-
-            if (wasAlerting) {
-                stopVoiceAlert();
-            }
-
-            wasAlerting = false;
-
-            if (detection === "Eyes Closed") {
-                setMessage("Eyes closed. Monitoring carefully.", "warning");
-
-            } else if (detection === "Eyes Open") {
-                setMessage("Driver's eyes are open. Monitoring active.");
-
-            } else if (detection === "Face not detected") {
-                setMessage("Face not detected. Please face the camera.", "warning");
-
-            } else {
-                setMessage(detection);
-            }
+        if (data.detection_status) {
+            updateDetection(data.detection_status);
         }
-
-        if (detection !== lastHistoryStatus &&
-            (detection === "Eyes Closed" || detection === "Face not detected")) {
-            addHistory(detection);
-        }
-
-        lastHistoryStatus = detection;
 
     } catch (error) {
         console.log("Status check error:", error);
     }
 }
-
-setInterval(checkStatus, 500);
 </script>
-
 </body>
 </html>
