@@ -18,7 +18,7 @@ header{display:flex;justify-content:space-between;align-items:center;gap:16px;pa
 .brand{display:flex;align-items:center;gap:13px}
 .logo{width:48px;height:48px;border-radius:14px;display:grid;place-items:center;background:linear-gradient(135deg,#0284c7,#4f46e5);font-size:25px}
 .brand h1{font-size:23px}.brand p{color:var(--muted);font-size:13px;margin-top:5px}
-.live-badge{display:flex;align-items:center;gap:8px;color:var(--green);background:#0b2b2b;border:1px solid #155e55;border-radius:30px;padding:10px 15px;font-size:13px}
+.header-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.user-chip{color:#cbd5e1;font-size:13px}.logout-btn{border:1px solid #3b506d;background:#14243b;color:#e2e8f0;padding:10px 14px;border-radius:9px;font-weight:600;cursor:pointer}.live-badge{display:flex;align-items:center;gap:8px;color:var(--green);background:#0b2b2b;border:1px solid #155e55;border-radius:30px;padding:10px 15px;font-size:13px}
 .dot{width:8px;height:8px;background:currentColor;border-radius:50%}
 main{max-width:1400px;margin:auto;padding:32px 5%}
 .welcome{margin-bottom:25px}.welcome h2{font-size:30px;margin-bottom:9px}
@@ -71,9 +71,12 @@ button:hover{opacity:.88}button:disabled{opacity:.45;cursor:not-allowed}
             <p>Driver Drowsiness Detection System</p>
         </div>
     </div>
-    <div class="live-badge">
-        <span class="dot"></span>
-        <span id="headerState">System Ready</span>
+    <div class="header-actions">
+        <span class="user-chip">Welcome, {{ user_name|e }}</span>
+        <div class="live-badge"><span class="dot"></span><span id="headerState">System Ready</span></div>
+        <form method="POST" action="{{ url_for('logout') }}" onsubmit="return confirm('Log out of DriveSafe?')">
+            <button class="logout-btn" type="submit">Logout ↗</button>
+        </form>
     </div>
 </header>
 
